@@ -1,35 +1,47 @@
-# Glob::Bug::Repro
+# RubyGems Glob Bug
 
-Welcome to your new gem! In this directory, you'll find the files you need to be able to package up your Ruby library into a gem. Put your Ruby code in the file `lib/glob/bug/repro`. To experiment with that code, run `bin/console` for an interactive prompt.
+**TL;DR:** The implementation of `Gem::Util.glob_files_in_dir` method will unexpectedly return _relative_ paths, instead of _absolute_ paths. This causes `Gem.find_files` to return filepaths will raise an error when passed to `Kernel#require`.
 
-TODO: Delete this and the text above, and describe your gem
+## Minimum Repro
 
-## Installation
-
-Add this line to your application's Gemfile:
-
+Running `minimum_repro.rb` in this repo will output the unrequireable filename:
 ```ruby
-gem 'glob-bug-repro'
+# minimum_repro.rb
+fail unless RUBY_VERSION >= "2.5"
+$LOAD_PATH.unshift "test"
+puts Gem.find_files("minitest/*_plugin.rb")
+```
+```
+$ bundle exec ruby minimum_repro.rb
+test/minitest/noop_plugin.rb
+/Users/tonyta/.rbenv/versions/2.5.1/lib/ruby/gems/2.5.0/gems/minitest-5.11.3/lib/minitest/pride_plugin.rb
 ```
 
-And then execute:
+## Realistic Repro
 
-    $ bundle
+This problem can manifest when using the following:
+- RubyGems 3.0 (since it contains a change introduced in [rubygems PR#2336](https://github.com/rubygems/rubygems/pull/2336))
+- Ruby 2.5 or above (since the behavior [switches on `RUBY_VERSION`](https://github.com/rubygems/rubygems/blob/v3.0.0/lib/rubygems/util.rb#L124-L128))
+- Minitest testing framework and its default behavior to `load_plugins`
+- Test Rake task (`Rails::TestTask`) provided by Rails 4.2 as defined in the `railties` gem
+- User-defined Minitest plugin in the project's `test/` directory
 
-Or install it yourself as:
+Below is an explanation of how it works (or, er... doesn't work):
 
-    $ gem install glob-bug-repro
+1. `Rails::TestTask` will [add the relative path `test`](https://github.com/rails/rails/blob/v4.2.11/railties/lib/rails/test_unit/sub_test_task.rb#L103) to the [$LOAD_PATH without expanding it](https://github.com/rails/rails/blob/v4.2.11/railties/lib/rails/test_unit/sub_test_task.rb#L112). This causes `$LOAD_PATH` to contain relative paths.
 
-## Usage
+2. When Minitest is invoked, it will attempt to [find all minitest plugins and require them](https://github.com/seattlerb/minitest/blob/master/lib/minitest.rb#L92-L100) via `Gem.find_files`.
 
-TODO: Write usage instructions here
+3. If the user has defined a Minitest plugin from within directory in `$LOAD_PATH` that is a relative path (e.g. the `test/` directory in a Rails project), its non-expanded path will be returned by `Gem.find_files`.
 
-## Development
+4. Minitest will attempt to `require` all found plugins, but will fail since the relative path for the user-defined plugin is prepended with its parent directory, making it unrequireable.
 
-After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
 
-To install this gem onto your local machine, run `bundle exec rake install`. To release a new version, update the version number in `version.rb`, and then run `bundle exec rake release`, which will create a git tag for the version, push git commits and tags, and push the `.gem` file to [rubygems.org](https://rubygems.org).
+## Live Example
 
-## Contributing
+This repo contains a live example of this bug which you can replay commit-by-commit. You can reproduce the error by running the following command:
 
-Bug reports and pull requests are welcome on GitHub at https://github.com/[USERNAME]/glob-bug-repro.
+```
+$ bundle exec rake
+```
+
